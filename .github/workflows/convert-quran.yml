@@ -1,0 +1,87 @@
+name: Convert Quran audio
+
+# Запускается вручную: вкладка Actions -> Convert Quran audio -> Run workflow.
+# Скачивает суры выбранного чтеца с официального CDN islamic.network (alquran.cloud),
+# превращает их в Ogg/Opus и сохраняет в папку quran/<folder>/ этого репозитория.
+on:
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: "Идентификатор чтеца на CDN, например ar.alafasy (список: см. README)"
+        required: true
+      folder:
+        description: "Имя папки: строчные латинские буквы, цифры, - или _ (например afasy)"
+        required: true
+      mirror:
+        description: "Зеркало CDN"
+        type: choice
+        options: [global, ru]
+        default: global
+      surahs:
+        description: "Суры, например '1,18,36-40' (пусто = все 114)"
+        default: ""
+      source_bitrate:
+        description: "Битрейт, запрашиваемый у CDN: 32/40/48/64/128/192"
+        default: "128"
+      bitrate:
+        description: "Битрейт результата (Opus), кбит/с"
+        default: "16"
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs
+        env:
+          EDITION: ${{ inputs.edition }}
+          FOLDER: ${{ inputs.folder }}
+          SOURCE_BITRATE: ${{ inputs.source_bitrate }}
+          BITRATE: ${{ inputs.bitrate }}
+        run: |
+          [[ "$EDITION" =~ ^[a-z]{2,3}\.[a-zA-Z0-9_]{2,40}$ ]] || { echo "edition must look like ar.alafasy"; exit 1; }
+          [[ "$FOLDER" =~ ^[a-z0-9_-]{1,32}$ ]] || { echo "folder must match [a-z0-9_-]{1,32}"; exit 1; }
+          [[ "$SOURCE_BITRATE" =~ ^[0-9]{2,3}$ ]] || { echo "source_bitrate must be a number"; exit 1; }
+          [[ "$BITRATE" =~ ^[0-9]{1,3}$ ]] || { echo "bitrate must be a number"; exit 1; }
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Download and convert
+        env:
+          EDITION: ${{ inputs.edition }}
+          FOLDER: ${{ inputs.folder }}
+          MIRROR: ${{ inputs.mirror }}
+          SURAHS: ${{ inputs.surahs }}
+          SOURCE_BITRATE: ${{ inputs.source_bitrate }}
+          BITRATE: ${{ inputs.bitrate }}
+        run: |
+          ARGS=(--edition "$EDITION" --mirror "$MIRROR" --source-bitrate "$SOURCE_BITRATE" \
+                --bitrate "$BITRATE" --out "quran/$FOLDER")
+          if [ -n "$SURAHS" ]; then ARGS+=(--surahs "$SURAHS"); fi
+          python3 scripts/prepare_quran.py "${ARGS[@]}"
+
+      - name: Check file sizes (GitHub limit is 100 MB per file)
+        env:
+          FOLDER: ${{ inputs.folder }}
+        run: |
+          if find "quran/$FOLDER" -type f -size +95M | grep -q .; then
+            echo "Some files are larger than 95 MB. Re-run with a lower bitrate."
+            exit 1
+          fi
+          du -sh "quran/$FOLDER"
+
+      - name: Commit and push
+        env:
+          FOLDER: ${{ inputs.folder }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "quran/$FOLDER"
+          git commit -m "Add Quran audio: $FOLDER ($EDITION)" || echo "Nothing to commit"
+          git push
